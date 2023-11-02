@@ -10,102 +10,118 @@ References  :
 
 import numpy as np
 import cv2
-import cv2.aruco as aruco
+from cv2 import aruco
 import glob
+import math
 
-cap = cv2.VideoCapture(0)
+FONT = cv2.FONT_HERSHEY_SIMPLEX
+ARUCO_ID = 1
 
-####---------------------- CALIBRATION ---------------------------
-# termination criteria for the iterative algorithm
-criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+def calibrate_from_images(fpath):
+    ####---------------------- CALIBRATION ---------------------------
+    # termination criteria for the iterative algorithm
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
 
-# prepare object points, like (0,0,0), (1,0,0), (2,0,0) ....,(6,5,0)
-# checkerboard of size (7 x 6) is used
-objp = np.zeros((6*7,3), np.float32)
-objp[:,:2] = np.mgrid[0:7,0:6].T.reshape(-1,2)
+    # prepare object points, like (0,0,0), (1,0,0), (2,0,0) ....,(6,5,0)
+    # checkerboard of size (7 x 6) is used
+    objp = np.zeros((6*7,3), np.float32)
+    objp[:,:2] = np.mgrid[0:7,0:6].T.reshape(-1,2)
 
-# arrays to store object points and image points from all the images.
-objpoints = [] # 3d point in real world space
-imgpoints = [] # 2d points in image plane.
+    # arrays to store object points and image points from all the images.
+    objpoints = [] # 3d point in real world space
+    imgpoints = [] # 2d points in image plane.
 
-# iterating through all calibration images
-# in the folder
-images = glob.glob('calib_images/checkerboard/*.jpg')
+    # iterating through all calibration images
+    # in the folder
+    images = glob.glob(fpath)
 
-for fname in images:
-    img = cv2.imread(fname)
-    gray = cv2.cvtColor(img,cv2.COLOR_BGR2GRAY)
+    for fname in images:
+        img = cv2.imread(fname)
+        gray = cv2.cvtColor(img,cv2.COLOR_BGR2GRAY)
 
-    # find the chess board (calibration pattern) corners
-    ret, corners = cv2.findChessboardCorners(gray, (7,6),None)
+        # find the chess board (calibration pattern) corners
+        ret, corners = cv2.findChessboardCorners(gray, (7,6),None)
 
-    # if calibration pattern is found, add object points,
-    # image points (after refining them)
-    if ret == True:
-        objpoints.append(objp)
+        # if calibration pattern is found, add object points,
+        # image points (after refining them)
+        if ret == True:
+            objpoints.append(objp)
 
-        # Refine the corners of the detected corners
-        corners2 = cv2.cornerSubPix(gray,corners,(11,11),(-1,-1),criteria)
-        imgpoints.append(corners2)
+            # Refine the corners of the detected corners
+            corners2 = cv2.cornerSubPix(gray,corners,(11,11),(-1,-1),criteria)
+            imgpoints.append(corners2)
 
-        # Draw and display the corners
-        img = cv2.drawChessboardCorners(img, (7,6), corners2,ret)
+            # Draw and display the corners
+            img = cv2.drawChessboardCorners(img, (7,6), corners2,ret)
 
 
-ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, gray.shape[::-1],None,None)
+    ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, gray.shape[::-1],None,None)
+    return mtx,dist
+
+def show_aruco_markers(N=20, size=400) -> None:
+    for id in range(20):
+        marker_image = aruco.generateImageMarker(aruco_dict, id, size)
+        cv2.imshow("marker", marker_image)
+        cv2.waitKey(0)
+
+
+mtx,dist = calibrate_from_images(fpath='calib_images/checkerboard/*.jpg')
+aruco_dict = aruco.getPredefinedDictionary(aruco.DICT_6X6_250)
+objPoints = np.array([[0., 0., 0.], [1., 0., 0.], [1., 1., 0.], [0., 1., 0.]])
+# TODO: check if objPoints are right, it works but probably not for scale
+
+parameters = aruco.DetectorParameters()
+parameters.adaptiveThreshConstant = 10 # TODO: check constant
+detector = aruco.ArucoDetector(aruco_dict, parameters)
+
+def find_marker(frame, detector=detector, id=ARUCO_ID):
+    '''Find the marker on the frame'''
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    corners, ids, _ = detector.detectMarkers(gray)
+
+    if ids is None:     
+        cv2.putText(frame, "No Ids", (5,64), FONT, 1, (0,255,0),2,cv2.LINE_AA)
+        return frame, None
+    
+    strg = ''
+    for i in range(0, ids.size):
+        strg += str(ids[i][0])+', '
+    cv2.putText(frame, "ids: " + strg, (5,64), FONT, 1, (0,255,0),2,cv2.LINE_AA)
+
+    if ids[0][0] != 1:
+        aruco.drawDetectedMarkers(frame, corners)
+    
+    return frame, corners[0]
+
+def marker_angle(corner):
+    valid, rvec, tvec = cv2.solvePnP(objPoints, corner, mtx, dist)
+    cv2.drawFrameAxes(frame, mtx, dist, rvec, tvec, 1)
+
+    rmat = cv2.Rodrigues(rvec)[0]
+    P = np.hstack((rmat,tvec))
+    euler_angles_degrees = -cv2.decomposeProjectionMatrix(P)[6]
+    roll = euler_angles_degrees[2][0]
+    return roll
+
+
+from time import time
+t = [time()]
+roll = [0]
 
 ###------------------ ARUCO TRACKER ---------------------------
+cap = cv2.VideoCapture(0)
 while (True):
     ret, frame = cap.read()
-    #if ret returns false, there is likely a problem with the webcam/camera.
-    #In that case uncomment the below line, which will replace the empty frame 
-    #with a test image used in the opencv docs for aruco at https://www.docs.opencv.org/4.5.3/singlemarkersoriginal.jpg
-    # frame = cv2.imread('./images/test image.jpg') 
+    frame,corner = find_marker(frame)
+    if corner is not None:        
+        roll.append(marker_angle(corner))
+        t.append(time())
+        rate = (roll[-1]-roll[-2])/(t[-1]-t[-2])
+        cv2.putText(frame, f"Roll: {roll[-1]:.2f} deg", 
+                    (5,96), FONT, 1, (0,255,0),2,cv2.LINE_AA)
+        cv2.putText(frame, f"Rate: {rate/360:.2f} rps", 
+                    (5,96+32), FONT, 1, (0,255,0),2,cv2.LINE_AA)
 
-    # operations on the frame
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-    # set dictionary size depending on the aruco marker selected
-    aruco_dict = aruco.Dictionary_get(aruco.DICT_6X6_250)
-
-    # detector parameters can be set here (List of detection parameters[3])
-    parameters = aruco.DetectorParameters_create()
-    parameters.adaptiveThreshConstant = 10
-
-    # lists of ids and the corners belonging to each id
-    corners, ids, rejectedImgPoints = aruco.detectMarkers(gray, aruco_dict, parameters=parameters)
-
-    # font for displaying text (below)
-    font = cv2.FONT_HERSHEY_SIMPLEX
-
-    # check if the ids list is not empty
-    # if no check is added the code will crash
-    if np.all(ids != None):
-
-        # estimate pose of each marker and return the values
-        # rvet and tvec-different from camera coefficients
-        rvec, tvec ,_ = aruco.estimatePoseSingleMarkers(corners, 0.05, mtx, dist)
-        #(rvec-tvec).any() # get rid of that nasty numpy value array error
-
-        for i in range(0, ids.size):
-            # draw axis for the aruco markers
-            cv2.drawFrameAxes(frame, mtx, dist, rvec[i], tvec[i], 0.1)
-
-        # draw a square around the markers
-        aruco.drawDetectedMarkers(frame, corners)
-
-
-        # code to show ids of the marker found
-        strg = ''
-        for i in range(0, ids.size):
-            strg += str(ids[i][0])+', '
-
-        cv2.putText(frame, "Id: " + strg, (0,64), font, 1, (0,255,0),2,cv2.LINE_AA)
-
-
-    else:
-        # code to show 'No Ids' when no markers are found
-        cv2.putText(frame, "No Ids", (0,64), font, 1, (0,255,0),2,cv2.LINE_AA)
 
     # display the resulting frame
     cv2.imshow('frame',frame)
